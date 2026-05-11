@@ -191,7 +191,8 @@ struct hllhdr {
 #define HLL_INVALIDATE_CACHE(hdr) (hdr)->card[7] |= (1<<7)
 #define HLL_VALID_CACHE(hdr) (((hdr)->card[7] & (1<<7)) == 0)
 
-
+/*reducing the number of registers from 14 for experinment.*/
+/* #define HLL_P 10 */
 #define HLL_P 14 /* The greater is P, the smaller the error. */
 #define HLL_Q (64-HLL_P) /* The number of bits of the hash value used for
                             determining the number of leading zeros. */
