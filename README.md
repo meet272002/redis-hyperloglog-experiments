@@ -889,12 +889,6 @@ python3 experiment4_sparse_threshold.py
 
 ## References
 
-1. Flajolet, P., Fusy, É., Gandouet, O., & Meunier, F. (2007). *HyperLogLog: the analysis of a near-optimal cardinality estimation algorithm.* DMTCS Proceedings.
+1. Redis 7.2 Source Code — `src/hyperloglog.c` — https://github.com/redis/redis
 
-2. Heule, S., Nunkesser, M., & Hall, A. (2013). *HyperLogLog in Practice: Algorithmic Engineering of a State of The Art Cardinality Estimation Algorithm.* EDBT 2013.
-
-3. Ertl, O. (2017). *New cardinality estimation algorithms for HyperLogLog sketches.* arXiv:1702.01284. *(Implemented in hllCount() at line 1050)*
-
-4. Redis 7.2 Source Code — `src/hyperloglog.c` — https://github.com/redis/redis
-
-5. Redis Configuration Reference — `redis.conf` line 1992 — `hll-sparse-max-bytes`
+2. Redis Configuration Reference — `redis.conf` line 1992 — `hll-sparse-max-bytes`
