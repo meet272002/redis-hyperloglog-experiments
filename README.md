@@ -3,7 +3,7 @@
 
 **Course:** DS614 — Big Data Engineering  
 **System Studied:** Redis 7.2 — HyperLogLog (`src/hyperloglog.c`)  
-**Repository:** [Your GitHub Link Here]
+**Group Member:** 202518023 and 202518036
 
 ---
 
