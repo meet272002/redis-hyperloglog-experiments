@@ -860,8 +860,10 @@ int hllSparseSet(robj *o, long index, uint8_t count) {
     int oldlen = is_xzero ? 2 : 1;
     int deltalen = seqlen-oldlen;
 
+    /* EXPERIMENT: hardcoded 500, original was server.hll_sparse_max_bytes=3000 */
     if (deltalen > 0 &&
         sdslen(o->ptr) + deltalen > server.hll_sparse_max_bytes) goto promote;
+	//sdslen(o->ptr) + deltalen > 500) goto promote;
     serverAssert(sdslen(o->ptr) + deltalen <= sdsalloc(o->ptr));
     if (deltalen && next) memmove(next+deltalen,next,end-next);
     sdsIncrLen(o->ptr,deltalen);
@@ -1270,6 +1272,19 @@ void pfaddCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_STRING,"pfadd",c->argv[1],c->db->id);
         server.dirty += updated;
         HLL_INVALIDATE_CACHE(hdr);
+    }
+    /* EXPERIMENT B: Corporate fraud detection alert
+     * If key starts with "card:" and cardinality exceeds 10
+     * unique locations, flag as suspicious activity */
+    if (strncmp(c->argv[1]->ptr, "card:", 5) == 0) {
+        struct hllhdr *fhdr = o->ptr;
+        uint64_t card = hllCount(fhdr, NULL);
+        if (card > 10) {
+            fprintf(stderr,
+                "[FRAUD ALERT] Card '%s' accessed from %llu unique locations!\n",
+                (char*)c->argv[1]->ptr,
+                (unsigned long long)card);
+        }
     }
     addReply(c, updated ? shared.cone : shared.czero);
 }
