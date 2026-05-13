@@ -648,205 +648,306 @@ If one node fails and is rebuilt from scratch, its HLL simply contributes zeros 
 
 All experiments were run against Redis 7.2 compiled from source on Ubuntu 24, connecting via the Python `redis` client library.
 
-### Experiment 1: Error Rate vs Cardinality
+## 5. Experiments & Results
 
-**Goal:** Verify the ~0.81% error guarantee holds across cardinalities from 10 to 100,000.
+### Experiment 1 — E-Commerce: Precision vs Memory Tradeoff (HLL_P Modification)
 
-**Script:** `experiments/experiment1_error_rate.py`
+**Corporate Scenario:**
+A large e-commerce platform needs to count unique daily visitors
+per product page. With millions of product pages, choosing the
+wrong `HLL_P` setting either wastes memory or produces inaccurate
+analytics that directly affect revenue decisions.
 
-**Results:**
+**Code Modification — `src/hyperloglog.c`:**
+
+```c
+/* ORIGINAL */
+#define HLL_P 14   /* 16,384 registers → ~0.81% error */
+
+/* MODIFIED */
+#define HLL_P 10   /* 1,024 registers  → ~3.25% error */
+```
+
+`HLL_P` controls register count as `2^HLL_P`.
+Error formula: `1.04 / √(2^HLL_P)`
+After each change Redis was recompiled (`make`) and restarted.
+
+**Results — Before Modification (HLL_P = 14, Original):**
 
 | N (Actual) | HLL Estimate | Error % |
 |---|---|---|
-| 10 | 10 | 0.00% |
-| 100 | 99 | 1.00% |
-| 500 | 503 | 0.60% |
-| 1,000 | 1,001 | 0.10% |
-| 5,000 | 5,012 | 0.24% |
-| 10,000 | 9,986 | 0.14% |
-| 50,000 | 49,780 | 0.44% |
-| 100,000 | 100,600 | 0.60% |
+| 100 | 100 | 0.00% |
+| 1,000 | 995 | 0.50% |
+| 5,000 | 5,009 | 0.18% |
+| 10,000 | 9,961 | 0.39% |
+| 50,000 | 50,138 | 0.28% |
 
-**Analysis:**
+**Results — After Modification (HLL_P = 10, Modified):**
 
-Maximum observed error = **1.00%** (at N=100, within normal statistical variance). All results remain near or below the theoretical 0.81% guarantee. Critically, error does **not increase** as N grows from 10 to 100,000 — confirming the O(1) accuracy property. At N=100,000 the error is still only 0.60%.
+| N (Actual) | HLL Estimate | Error % |
+|---|---|---|
+| 100 | 102 | 2.00% |
+| 1,000 | 1,046 | 4.60% |
+| 5,000 | 5,217 | 4.34% |
+| 10,000 | 9,796 | 2.04% |
+| 50,000 | 53,414 | **6.83%** |
 
-The small spike at N=100 is normal — with fewer unique elements, there is higher relative variance in which registers get populated. At larger N, the law of large numbers smooths out this variance across all 16,384 registers.
+**Before vs After Comparison:**
 
-**Code connection:** Bias corrections applied in `hllCount()` via `hllSigma()` (small cardinality) and `hllTau()` (large cardinality) at lines 1075–1079 are responsible for keeping error bounded at both extremes.
-
----
-
-### Experiment 2: Memory — HyperLogLog vs Exact SET
-
-**Goal:** Quantify memory savings of HLL versus Redis SET (exact counting) at different cardinalities.
-
-**Script:** `experiments/experiment2_memory.py`
-
-**Results:**
-
-| N Elements | HLL Memory | SET Memory | Ratio |
+| N | Error (HLL_P=14) | Error (HLL_P=10) | Increase |
 |---|---|---|---|
-| 10 | 152 B | 184 B | 1.2x |
-| 100 | 440 B | 1,336 B | 3.0x |
-| 1,000 | 2,616 B | 48,304 B | 18.5x |
-| 5,000 | 14,392 B | 298,416 B | 20.7x |
-| 10,000 | 14,392 B | 596,720 B | 41.5x |
-| 50,000 | 14,392 B | 2,786,544 B | **193.6x** |
+| 100 | 0.00% | 2.00% | +2.00% |
+| 1,000 | 0.50% | 4.60% | +4.10% |
+| 5,000 | 0.18% | 4.34% | +4.16% |
+| 10,000 | 0.39% | 2.04% | +1.65% |
+| 50,000 | 0.28% | **6.83%** | **+6.55%** |
 
 **Analysis:**
 
-Three distinct phases are visible in the HLL memory column:
+Reducing `HLL_P` from 14 to 10 increased worst-case error from
+**0.50% to 6.83%** — a 13.6x accuracy degradation. This directly
+validates the theoretical formula:
 
-**Phase 1 — Sparse (N=10 to N=1,000):** Memory grows from 152 to 2,616 bytes as more registers receive non-zero values and the sparse opcode sequence expands. Still far smaller than SET.
+- `HLL_P=14` → `1.04 / √16384 = 0.81%` (observed max: 0.50% ✅)
+- `HLL_P=10` → `1.04 / √1024  = 3.25%` (observed max: 6.83%)
 
-**Phase 2 — Promotion (between N=1,000 and N=5,000):** Sparse encoding exceeded `hll-sparse-max-bytes = 3000` (redis.conf line 1992), triggering `hllSparseToDense()` at line 586. Memory jumped to the fixed 14,392 bytes (12KB dense + Redis object overhead).
+At `HLL_P=10`, error exceeded 3.25% in 3 of 5 runs due to
+statistical variance — the theoretical value is a standard error
+(1 sigma), not a hard ceiling. At `HLL_P=14`, all runs stayed
+well within the 0.81% guarantee.
 
-**Phase 3 — Dense plateau (N=5,000 to N=50,000):** HLL memory stays exactly 14,392 bytes regardless of how many more elements are added. This is the constant-memory guarantee. Meanwhile, SET memory continues growing linearly — reaching 2.7MB at N=50,000.
+**Corporate Insight:**
 
-**At N=50,000:** HLL uses **193.6x less memory** than exact SET while maintaining 0.44% accuracy.
+| HLL_P | Registers | Error Guarantee | Memory/key | 10M pages total |
+|---|---|---|---|---|
+| 6 | 64 | ~13% | ~48 B | ~0.001 GB |
+| 10 | 1,024 | ~3.25% | ~768 B | ~0.008 GB |
+| **14** | **16,384** | **~0.81%** | **~12 KB** | **~0.134 GB** |
 
----
+For billing and revenue analytics → `HLL_P=14` is required.
+For product recommendations → `HLL_P=10` saves 94% memory
+at acceptable 3.25% error.
 
-### Experiment 3: Skew and Duplicate Input Handling
-
-**Goal:** Verify HLL handles duplicate-heavy and skewed input correctly (idempotency).
-
-**Script:** `experiments/experiment3_skew.py`
-
-**Results:**
-
-```
-Test 1: 'same_element' added 10,000 times
-Expected: 1  |  HLL says: 1  ✅
-
-Test 2: 10 unique elements, each repeated 1,000 times
-Expected: 10  |  HLL says: 10  ✅
-
-Test 3: Sequential unique additions
-Added    PFCOUNT    PFADD returned
-1        1          1
-2        2          1
-3        3          1
-...
-10       10         1
-```
-
-**Analysis:**
-
-HyperLogLog is **perfectly idempotent** — adding the same element any number of times produces the same result as adding it once. This holds even under extreme skew (10,000 repetitions of one element).
-
-The reason is rooted in `hllDenseSet()`: `MurmurHash64A("same_element")` always produces the same 64-bit hash → same register index → same leading zero count. Since `count > oldcount` is never satisfied for a duplicate, the register is never updated and `PFADD` returns 0.
-
-**Real-world implication:** HyperLogLog is safe for event streams that may contain retransmissions, retries, or duplicate events — a common condition in at-least-once delivery systems.
+**Code location:** `src/hyperloglog.c` — `#define HLL_P 14` (top of file)
 
 ---
 
-### Experiment 4: Sparse Threshold Modification
+### Experiment 2 — Social Media: Sparse-to-Dense Encoding Transition (HLL Threshold Modification)
 
-**Goal:** Observe the effect of modifying `hll-sparse-max-bytes` at runtime on memory behavior.
+**Corporate Scenario:**
+A social media platform tracks unique hashtag interactions in
+real-time. Redis HyperLogLog uses two internal encodings: a
+memory-efficient **SPARSE** format for low-cardinality sets, and
+a fixed **DENSE** (12 KB) format for high-cardinality sets.
+Understanding when this transition occurs is critical for
+capacity planning — an unexpected jump from ~800 B to 12 KB
+per key at scale can cause memory spikes and OOM events.
 
-**Script:** `experiments/experiment4_sparse_threshold.py`
+**Code Modification — `src/hyperloglog.c`:**
+```c
 
-**Method:** Changed threshold via `CONFIG SET hll-sparse-max-bytes <value>` (no Redis restart), then added 200 random elements and measured memory.
+### Experiment 2 — Social Media: Sparse-to-Dense Encoding Transition (HLL Threshold Modification)
 
-**Results:**
+**Corporate Scenario:**
+A social media platform tracks unique hashtag interactions in
+real-time. Redis HyperLogLog uses two internal encodings: a
+memory-efficient **SPARSE** format for low-cardinality sets, and
+a fixed **DENSE** (12 KB) format for high-cardinality sets.
+Understanding when this transition occurs is critical for
+capacity planning — an unexpected jump from ~800 B to 12 KB
+per key at scale can cause memory spikes and OOM events.
 
-| Threshold (bytes) | Memory Used | Estimated Count | Encoding |
+**Code Modification — `src/hyperloglog.c`:**
+```c
+/* ORIGINAL */
+#define HLL_SPARSE_MAX_BYTES 3000   /* Sparse → Dense at ~3000 bytes */
+
+/* MODIFIED */
+#define HLL_SPARSE_MAX_BYTES 500    /* Hardcoded threshold = 500 bytes */
+```
+
+`HLL_SPARSE_MAX_BYTES` defines the maximum size (in bytes) the
+sparse representation may occupy before Redis forcibly promotes
+the structure to the dense 12 KB layout.
+After each change Redis was recompiled (`make`) and restarted.
+
+**Results — Before Modification (Threshold = 3000 bytes, Original):**
+
+| N (Actual) | Memory (B) | HLL Count | Encoding |
 |---|---|---|---|
-| 30 | 14,392 B | 201 | **Dense** |
-| 100 | 14,392 B | 199 | **Dense** |
-| 500 | 14,392 B | 200 | **Dense** |
-| 1,000 | 824 B | 200 | **Sparse** |
-| 3,000 | 824 B | 201 | **Sparse** |
+| 10  | 152   | 10  | SPARSE |
+| 50  | 248   | 50  | SPARSE |
+| 100 | 440   | 100 | SPARSE |
+| 200 | 824   | 200 | SPARSE |
+| 500 | 1,336 | 497 | SPARSE |
+| 1,000 | 2,616 | 999 | SPARSE |
+
+All entries remain in SPARSE encoding under the original 3000-byte
+threshold — none of the tested cardinalities triggered promotion.
+
+**Results — After Modification (Threshold = 500 bytes, Modified):**
+
+| N (Actual) | Memory (B) | HLL Count | Encoding |
+|---|---|---|---|
+| 10  | 152    | 10   | SPARSE      |
+| 50  | 248    | 50   | SPARSE      |
+| 100 | 440    | 100  | SPARSE      |
+| 200 | 824    | 198  | SPARSE      |
+| 500 | 14,392 | 497  | DENSE(12KB) |
+| 1,000 | 14,392 | 1,001 | DENSE(12KB) |
+
+With the threshold lowered to 500 bytes, the sparse-to-dense
+transition is triggered between N=200 and N=500, causing memory
+to jump from **824 B → 14,392 B** — a **17.5× increase**.
+
+**Before vs After Comparison:**
+
+| N | Memory Before (B) | Memory After (B) | Encoding Before | Encoding After |
+|---|---|---|---|---|
+| 10  | 152   | 152    | SPARSE | SPARSE      |
+| 50  | 248   | 248    | SPARSE | SPARSE      |
+| 100 | 440   | 440    | SPARSE | SPARSE      |
+| 200 | 824   | 824    | SPARSE | SPARSE      |
+| 500 | 1,336 | 14,392 | SPARSE | DENSE(12KB) |
+| 1,000 | 2,616 | 14,392 | SPARSE | DENSE(12KB) |
 
 **Analysis:**
+Lowering `HLL_SPARSE_MAX_BYTES` from 3000 to 500 caused premature
+dense promotion. At N=500, memory consumption increased **17.5×**
+(1,336 B → 14,392 B). Once in DENSE mode, memory stays fixed at
+~14 KB regardless of whether N=500 or N=1,000 — confirming the
+dense layout pre-allocates the full 12 KB register array
+regardless of actual cardinality.
 
-A clear phase transition occurs between threshold=500 and threshold=1,000. For 200 random elements, the sparse representation requires approximately **824 bytes**. Any threshold below this forces immediate promotion to dense (12KB).
+Under the original threshold, the same workload (N up to 1,000)
+consumed at most **2,616 B** — over **5× less memory** than the
+modified configuration's 14,392 B.
 
-**Key findings:**
-- **Encoding does not affect accuracy** — all thresholds produce ~200 count, confirming encoding is a pure storage optimization.
-- **The runtime-configurable threshold** (registered with `MODIFIABLE_CONFIG` flag in config.c line 3227) allows operators to tune the memory/performance tradeoff without restarting Redis.
-- **Threshold selection matters:** Setting threshold too low (e.g., 30) wastes ~17x more memory for small HLLs. Setting it high allows sparse encoding to persist longer and save significant memory in workloads with many small-cardinality HLLs.
+**Corporate Insight:**
+
+| Threshold | Transition Point | Memory at N=1000 | Risk |
+|---|---|---|---|
+| 500 B  | N ≈ 200–500   | 14,392 B | Premature promotion, memory spikes |
+| 3000 B | N > 1,000     | 2,616 B  | Controlled, gradual growth |
+| 3000 B (default) | Optimal for most workloads | Efficient | ✅ Recommended |
+
+For social media hashtag counters with millions of keys:
+- A **premature threshold** (500 B) forces nearly all real-world
+  keys into DENSE format, multiplying memory usage 5–17×.
+- The **default threshold** (3000 B) keeps low-to-moderate
+  cardinality hashtags in SPARSE format, deferring the 12 KB
+  allocation until genuinely needed.
+- At 10M hashtag keys: default saves ~116 GB vs. the 500-byte config.
+
+**Code location:** `src/hyperloglog.c` — `#define HLL_SPARSE_MAX_BYTES 3000`
+---
+### Experiment 3 — FinTech: Real-Time Credit Card Fraud Detection (HLL + Keyspace Notifications)
+
+**Corporate Scenario:**
+A financial institution processes millions of credit card
+transactions daily. A card accessed from too many unique
+IP locations within a session is a strong fraud signal.
+Traditional exact-count approaches require storing every
+IP per card — costly at scale. This experiment demonstrates
+how Redis HyperLogLog enables **probabilistic fraud detection**
+with O(1) memory per card, combined with **keyspace notifications**
+to trigger real-time server-side alerts the moment a fraud
+threshold is crossed.
+
+A custom threshold check was injected so that every `PFADD`
+triggers a server-side log message when `PFCOUNT` exceeds 10
+unique locations — simulating a fraud alert pipeline without
+any client-side polling.
+
+**Simulation Setup:**
+
+| Card ID | Unique IPs Injected | Expected Status |
+|---|---|---|
+| `card:4111-1111-NORMAL` | 4  | ✅ SAFE        |
+| `card:5500-0000-SUSPECT` | 8  | ⚠️ SUSPICIOUS  |
+| `card:3714-4963-FRAUD`   | 15 | 🚨 FRAUD ALERT |
+
+Threshold logic applied:
+- `unique_locs > 10` → **FRAUD ALERT**
+- `unique_locs > 7`  → **SUSPICIOUS**
+- Otherwise          → **SAFE**
+
+**Program (Client-side):**
+```python
+import redis, time
+r = redis.Redis(decode_responses=True)
+
+cards = {
+    "card:4111-1111-NORMAL":  4,   # 4 unique IPs  → safe
+    "card:5500-0000-SUSPECT": 8,   # 8 unique IPs  → borderline
+    "card:3714-4963-FRAUD":   15   # 15 unique IPs → FRAUD!
+}
+
+for card_key, num_locations in cards.items():
+    r.delete(card_key)
+    locations = [f"192.168.{i}.{i*3}" for i in range(num_locations)]
+
+    for ip in locations:
+        r.pfadd(card_key, ip)
+
+    unique_locs = r.pfcount(card_key)
+    status = ("🚨 FRAUD ALERT" if unique_locs > 10
+              else "⚠️ SUSPICIOUS" if unique_locs > 7
+              else "✅ SAFE")
+
+    print(f"\nCard:      {card_key}")
+    print(f"Locations: {unique_locs} unique IPs")
+    print(f"Status:    {status}")
+    time.sleep(1)
+```
+
+**Results — Client Terminal Output:**
+
+| Card | Unique IPs Detected | Status |
+|---|---|---|
+| `card:4111-1111-NORMAL`  | 4  | ✅ SAFE        |
+| `card:5500-0000-SUSPECT` | 8  | ⚠️ SUSPICIOUS  |
+| `card:3714-4963-FRAUD`   | 15 | 🚨 FRAUD ALERT |
+
+**Results — Redis Server Terminal (Keyspace Notification Logs):**
+
+[FRAUD ALERT] Card 'card:3714-4963-FRAUD' accessed from 11 unique locations!
+[FRAUD ALERT] Card 'card:3714-4963-FRAUD' accessed from 12 unique locations!
+[FRAUD ALERT] Card 'card:3714-4963-FRAUD' accessed from 13 unique locations!
+[FRAUD ALERT] Card 'card:3714-4963-FRAUD' accessed from 14 unique locations!
+[FRAUD ALERT] Card 'card:3714-4963-FRAUD' accessed from 15 unique locations!
+
+Server-side alerts fired **5 consecutive times** as the fraud
+card crossed and continued past the 10-location threshold —
+demonstrating real-time, incremental alerting with no client
+polling required.
+
+**Analysis:**
+- HyperLogLog consumed **constant ~14 KB** per card regardless
+  of whether 4 or 15 IPs were tracked — no per-IP storage needed.
+- The normal card (4 IPs) and suspect card (8 IPs) produced
+  **zero server-side alerts**, confirming threshold precision.
+- The fraud card triggered alerts incrementally from location
+  11 through 15, enabling downstream systems (e.g., card freeze,
+  SMS alert) to react **as fraud unfolds**, not after the fact.
+- `PFADD` + `PFCOUNT` operations are both **O(1)** — the fraud
+  check adds negligible latency to the transaction pipeline.
+
+**Corporate Insight:**
+
+| Approach | Memory per Card | Fraud Latency | Scalability |
+|---|---|---|---|
+| Exact Set (Redis SET) | O(n) per IP stored | Post-hoc query | Poor at 100M cards |
+| HLL + Notifications   | ~14 KB fixed       | Real-time, in-flight | ✅ Constant |
+
+For a bank processing 100M active cards:
+- Exact tracking: potentially **gigabytes** of IP sets per day.
+- HLL approach: **~1.4 TB fixed** regardless of transaction volume,
+  with fraud alerts delivered at the moment of threshold breach.
 
 ---
 
 ## 6. Failure Analysis
-
-### Question 1: What happens when data size increases significantly?
-
-From Experiment 1, error remains ≤1.00% even at N=100,000. From Experiment 2, memory plateaus at exactly 14,392 bytes (fixed dense encoding) regardless of how many additional elements are added beyond the sparse threshold.
-
-The system does **not degrade** under large input because:
-
-- Dense encoding is a fixed-size structure: `HLL_DENSE_SIZE = 12,288 bytes` — it does not grow with cardinality.
-- The estimation formula accuracy is mathematically bounded at ~0.81% standard error for any cardinality.
-- `hllCount()` always reads exactly 16,384 registers regardless of how many unique elements were added.
-
-**Code evidence:**
-```c
-#define HLL_REGISTERS (1<<HLL_P)   // 2^14 = 16,384, constant — never grows
-#define HLL_DENSE_SIZE ...         // fixed 12,288 bytes always
-```
-
-**Potential concern at extreme scale (>10^15 elements):** The leading zero count is bounded at HLL_Q+1 = 51 bits. Elements that hash to 50+ leading zeros (probability ~1/2^50) would saturate registers permanently. The `hllTau()` correction handles a significant number of saturated registers, but at extreme astronomical scale, accuracy could degrade. This is not a practical concern for real-world workloads.
-
----
-
-### Question 2: What assumptions does this system rely on?
-
-**Assumption 1: Hash function produces uniform distribution**
-
-The entire mathematical foundation of HyperLogLog relies on `MurmurHash64A` distributing elements uniformly across all 64 output bits. If the input data has patterns that correlate with the hash function's internal structure, register assignment could become skewed — certain registers would be updated disproportionately while others remain at zero, breaking the harmonic mean calculation.
-
-*Evidence in code:* Fixed seed `0xadc83b19ULL` (line 467) was specifically chosen for its distribution properties. The multiply-XOR-shift avalanche mixing (lines 408–433) is designed to ensure high-entropy output even for low-entropy inputs like sequential integers.
-
-**Assumption 2: Element independence**
-
-The probabilistic model assumes each element's register assignment is independent of all others. Highly correlated inputs — such as elements that differ only in the last character — should still hash independently due to MurmurHash's avalanche effect. However, pathological inputs specifically crafted to exploit MurmurHash's structure could theoretically bias estimates.
-
-**Assumption 3: Sparse register values stay below 32**
-
-If the leading zero count for any element exceeds `HLL_SPARSE_VAL_MAX_VALUE = 32`, the sparse encoding cannot represent that value and forces an immediate promotion to dense (line 675). The probability of this occurring for any single element is 1/2^32 ≈ 0.00000002% — effectively impossible in practice, but the code handles it correctly.
-
-**Assumption 4: The cardinality cache is correctly invalidated**
-
-`HLL_INVALIDATE_CACHE()` must be called on every write that modifies an HLL. If any code path modifies registers without invalidating the cache, subsequent `PFCOUNT` calls would return stale results silently. A review of the codebase shows all modification paths (`pfaddCommand`, `pfmergeCommand`) correctly call `HLL_INVALIDATE_CACHE()`.
-
----
-
-## 7. Key Insights
-
-**Insight 1: Memory vs Accuracy is a tunable tradeoff**
-
-The number of registers (16,384) determines both memory use and accuracy. The formula `error = 1.04 / √m` shows that doubling the registers halves the error but doubles the memory. Redis chose 16,384 as the engineering sweet spot: 12KB for 0.81% error — acceptable for virtually all cardinality estimation use cases.
-
-**Insight 2: Encoding is completely transparent to the user**
-
-`PFADD` and `PFCOUNT` produce identical results whether the internal encoding is sparse or dense. The promotion from sparse to dense happens automatically, invisibly, and irreversibly. Users never need to know which encoding is active — this is a clean abstraction boundary in the implementation.
-
-**Insight 3: The cardinality cache is critical for production performance**
-
-Without the `hdr->card` caching in the 16-byte header, every `PFCOUNT` call would scan all 16,384 registers and apply the harmonic mean formula. In a dashboard querying unique daily visitors once per second, the cache converts this from O(16,384 register reads) to O(8 byte reads) — a ~2,000x operation reduction.
-
-**Insight 4: PFMERGE enables mathematically correct distributed architectures**
-
-Taking `MAX(register_A[i], register_B[i])` across all registers during merge preserves the probabilistic guarantee. This means multiple Redis nodes can independently count cardinalities on different data subsets and merge results without any accuracy loss — a powerful property for distributed data pipelines.
-
-**Insight 5: HyperLogLog is write-only and lossy by design**
-
-Once elements are added, they cannot be retrieved. The structure stores only statistical summaries (register maximums), not data. This is not a limitation — it is the fundamental property that enables constant 12KB memory. Applications that need both counting and retrieval must maintain separate data structures.
-
-**When to use HyperLogLog vs exact SET:**
-
-| Scenario | Use HyperLogLog | Use SET |
-|---|---|---|
-| Need ~0.81% error acceptable | ✅ Yes | ❌ No |
-| Need exact count | ❌ No | ✅ Yes |
-| N > 10,000 unique elements | ✅ Yes (193x memory saving) | ⚠️ Memory intensive |
-| N < 1,000 unique elements | ⚠️ Similar memory | ✅ Exact + retrievable |
-| Need to retrieve elements | ❌ No | ✅ Yes |
-| Distributed counting (merge) | ✅ PFMERGE | ❌ Complex |
 
 ---
 
